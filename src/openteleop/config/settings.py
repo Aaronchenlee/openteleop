@@ -101,6 +101,18 @@ class TeleopConfig(BaseModel):
         "handshake (slow-joiner); this brief settle window avoids losing the "
         "first command burst after session bring-up.",
     )
+    link_upstream_bps: int = Field(
+        default=0,
+        ge=0,
+        description="Network-side upstream bandwidth budget (edge->cloud, bps). "
+        "0 = unconstrained. Used by adapter negotiation as a hard ceiling.",
+    )
+    link_downstream_bps: int = Field(
+        default=0,
+        ge=0,
+        description="Network-side downstream bandwidth budget (cloud->edge, bps). "
+        "0 = unconstrained. Used by adapter negotiation as a hard ceiling.",
+    )
     signaling_url: Optional[str] = None
     stun_servers: List[str] = Field(
         default_factory=lambda: ["stun:stun.l.google.com:19302"]

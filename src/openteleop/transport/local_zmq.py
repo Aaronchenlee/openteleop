@@ -151,23 +151,59 @@ class LocalZMQTransport(BaseTransport):
         self._telemetry_cb: Optional[Callable] = None
         self._video_cb: Optional[Callable] = None
         self._tactile_cb: Optional[Callable] = None
+        # Dynamic (adapter-managed) topic channels: name -> {port, owner, hwm}
+        self._dynamic: Dict[str, dict] = {}
+        self._topic_cbs: Dict[bytes, Callable] = {}
+        self._topic_channel: Dict[bytes, str] = {}
 
     # ---- address helpers ----
+    def _owner_of(self, name: str) -> str:
+        """Return the bind owner for a channel (fixed or dynamic)."""
+        if name in BIND_OWNER:
+            return BIND_OWNER[name]
+        dyn = self._dynamic.get(name)
+        return dyn["owner"] if dyn else self.role
+
     def _publisher_addr(self, name: str) -> str:
         port = _channel_port(self.config, name)
-        if BIND_OWNER[name] == self.role:
+        if self._owner_of(name) == self.role:
             return f"tcp://{self.config.host}:{port}"
         return f"tcp://{self._peer_ip}:{port}"
+
+    def register_dynamic_channel(
+        self, name: str, port: int, owner: str, hwm: int = 10
+    ) -> None:
+        """Register an adapter-managed topic channel with explicit bind owner."""
+        from ..config.settings import ChannelConfig
+
+        if not any(c.name == name for c in self.config.channels):
+            self.config.channels.append(
+                ChannelConfig(name=name, port=port, hwm=hwm)
+            )
+        self._dynamic[name] = {"port": port, "owner": owner, "hwm": hwm}
 
     def _publisher_for(self, name: str) -> _PublisherThread:
         addr = self._publisher_addr(name)
         if addr not in self._publishers:
             chan = next((c for c in self.config.channels if c.name == name), None)
-            hwm = chan.hwm if chan else DEFAULT_HWM
+            dyn = self._dynamic.get(name)
+            hwm = (dyn or {}).get("hwm") or (chan.hwm if chan else DEFAULT_HWM)
             pub = _PublisherThread(addr, hwm)
             pub.start()
             self._publishers[addr] = pub
         return self._publishers[addr]
+
+    # ---- generic topic channels (adapter-managed) ----
+    def publish_topic(self, name: str, topic: bytes, payload: bytes, ts_us: int) -> None:
+        """Publish arbitrary payload on a registered dynamic channel."""
+        wire = ts_us.to_bytes(8, "little") + payload
+        self._publisher_for(name).publish(topic, wire)
+
+    def on_topic(self, name: str, topic: bytes, callback: Callable) -> None:
+        """Subscribe to a dynamic channel topic. Callback: (payload, ts_us)."""
+        self._topic_cbs[topic] = callback
+        self._topic_channel[topic] = name
+        self._pending_subs.append((topic, name))
 
     # ---- cmd_unreliable ----
     def send_command(self, action: bytes, timestamp_us: int, seq: int) -> None:
@@ -250,6 +286,9 @@ class LocalZMQTransport(BaseTransport):
             # state_reliable is REP (not PUB) and is bound in _start_subscriptions.
             if name != "state_reliable" and BIND_OWNER[name] == self.role:
                 self._publisher_for(name)
+        for name, dyn in self._dynamic.items():
+            if dyn["owner"] == self.role:
+                self._publisher_for(name)
 
     def _start_subscriptions(self) -> None:
         loop = asyncio.get_running_loop()
@@ -261,17 +300,7 @@ class LocalZMQTransport(BaseTransport):
             sub.subscribe(topic)
             self._sub_sockets.append(sub)
 
-            async def _pump(sub=sub, topic=topic) -> None:
-                while self._running:
-                    try:
-                        msg = await sub.recv_multipart()
-                        self._dispatch(topic, msg)
-                    except zmq.Again:
-                        continue
-                    except (zmq.ZMQError, asyncio.CancelledError):
-                        break
-
-            self._sub_tasks.append(loop.create_task(_pump()))
+            self._sub_tasks.append(loop.create_task(self._pump_for(sub, topic)))
         self._pending_subs.clear()
 
         if self._need_rep and self.role == "robot":
@@ -281,7 +310,48 @@ class LocalZMQTransport(BaseTransport):
             )
             self._rep_task = loop.create_task(self._rep_loop())
 
+    async def _pump_for(self, sub, topic: bytes) -> None:
+        """Receive loop for one subscription socket."""
+        while self._running:
+            try:
+                msg = await sub.recv_multipart()
+                self._dispatch(topic, msg)
+            except zmq.Again:
+                continue
+            except (zmq.ZMQError, asyncio.CancelledError):
+                break
+
+    async def add_subscription(self, topic: bytes, channel_name: str) -> None:
+        """Add a subscriber after connect() (runtime topic join).
+
+        Needed when a dynamic channel binding is only known after negotiation
+        (e.g. the cloud adopts the edge's binding table). The new SUB connects
+        to the peer port and gets its own pump task.
+        """
+        if not self._running:
+            return
+        port = _channel_port(self.config, channel_name)
+        sub = self._ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.RCVTIMEO, 100)
+        sub.connect(f"tcp://{self._peer_ip}:{port}")
+        sub.subscribe(topic)
+        self._sub_sockets.append(sub)
+        self._sub_tasks.append(
+            asyncio.get_running_loop().create_task(self._pump_for(sub, topic))
+        )
+        # Slow-joiner: give the new SUB a moment to complete its connect.
+        await asyncio.sleep(0.05)
+
     def _dispatch(self, topic: bytes, msg: list[bytes]) -> None:
+        if topic in self._topic_cbs:
+            raw = msg[1]
+            ts = int.from_bytes(raw[:8], "little")
+            cb = self._topic_cbs[topic]
+            ch = self._topic_channel.get(topic)
+            cb(raw[8:], ts)
+            if ch and ch in self._stats:
+                self._stats[ch].observe(ts, int(time.time() * 1e6))
+            return
         if topic == b"cmd":
             raw = msg[1]
             ts = int.from_bytes(raw[:8], "little")

@@ -106,3 +106,82 @@ adaptive bitrate — see [deployment.md](deployment.md) for the rate ladder.
 | video | — | no | frame drop → brief visual glitch |
 | tactile_unreliable | no | no | one force sample skipped |
 | audio | — | no | brief audio dropout |
+
+## 7. QoS Negotiation & Authentication (adapter layer)
+
+Session bring-up rides the reliable `state_reliable` channel (REQ/REP). Three
+message types are defined on top of the transport envelope:
+
+### 7.1 Handshake (cloud → edge)
+
+```json
+{
+  "type": "openteleop.handshake",
+  "client_id": "cloud-01",
+  "ts": 1754000000.123,
+  "sig": "hex-of-hmac-sha256(secret, client_id|ts)"
+}
+```
+
+Edge verifies the signature (TTL 60 s) and replies:
+
+```json
+{
+  "ok": true,
+  "cred": {
+    "session_id": "uuid",
+    "client_id": "cloud-01",
+    "allowed_topics": ["arm/cmd", "custom/pc"],
+    "upstream_quota_bps": 2000000,
+    "downstream_quota_bps": 0,
+    "issued_at": 1754000000.123
+  }
+}
+```
+
+Failure returns `{"ok": false, "code": "auth_failed"}`.
+
+### 7.2 Negotiation (cloud → edge)
+
+```json
+{
+  "type": "openteleop.negotiate",
+  "declarations": {
+    "custom/pc": {
+      "rate_hz": 20, "max_latency_ms": 0, "max_jitter_ms": 0,
+      "upstream_bps": 1000000, "downstream_bps": 0,
+      "packet_size_bytes": 2000, "reliability": "best_effort",
+      "ordering": true, "max_loss_pct": 0.0, "priority": 0
+    }
+  }
+}
+```
+
+Edge merges stricter-wins (only topics declared on both sides survive), checks
+the aggregate bandwidth budget, and replies with the agreed table plus its
+channel binding table:
+
+```json
+{
+  "ok": true,
+  "agreed": { "<topic>": { ...qos } },
+  "bindings": {
+    "custom/pc": {"channel": "dyn_custom_pc", "port": 6100, "owner": "robot", "qos": {...}}
+  }
+}
+```
+
+Over-budget returns `{"ok": false, "code": "bandwidth_exceeded", "error": "..."}`.
+
+### 7.3 Dynamic channels
+
+Topics that don't unambiguously map to the fixed six get `dyn_<topic>` channels
+from port 6100+. The binding's `owner` (who binds, the other side connects) is
+chosen by data direction. Cloud adopts the edge's table after negotiation and
+joins dynamic subscriptions at runtime (`transport.add_subscription`).
+
+### 7.4 Monitoring
+
+`QoSDegrader` samples per-topic metrics and, on violation of the effective
+contract, walks the ladder reliability → rate → bitrate → packet size, then
+recovers stepwise. See [adapter.md](adapter.md).

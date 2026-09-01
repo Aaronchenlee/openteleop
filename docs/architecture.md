@@ -117,6 +117,30 @@ misalignment. `SyncBuffer`:
 | L3 | `SafetyMonitor` | hardware limits | independent thread, direct HW read → HW e-stop |
 | L4 | `VideoGuard` | stale video | block new command input until operator confirms |
 
+## 6.5 QoS Adapter Layer
+
+The `adapter` package provides the application-facing QoS API on both sides. It
+sits above the transport and below application code:
+
+- **Symmetric API** — `advertise` / `subscribe` / `request` on both `EdgeAdapter`
+  (robot) and `CloudAdapter` (operator).
+- **QoS contract** — 8+ dimensions per topic (`rate_hz`, `max_latency_ms`,
+  `max_jitter_ms`, `upstream_bps`, `downstream_bps`, `packet_size_bytes`,
+  `reliability`, `ordering`, `max_loss_pct`, `priority`).
+- **Negotiation** — cloud initiates over the reliable REQ/REP channel; edge
+  merges stricter-wins and runs a bandwidth budget check; the agreed table plus
+  the channel binding table is returned and adopted by the cloud.
+- **Channel mapping** — `ChannelMap` reuses the fixed six channels only for
+  unambiguous semantics (`RELIABLE` → `state_reliable`, video-grade upstream →
+  `video`); everything else allocates a dynamic channel from port 6100+.
+- **Network-side auth** — HMAC-SHA256 handshake (60 s TTL), signed session
+  credentials with topic ACL, and per-client bandwidth quotas.
+- **Runtime monitoring** — `QoSDegrader` detects violations against the
+  effective contract and walks a degradation ladder (reliability → rate →
+  bitrate → packet size), recovering stepwise.
+
+See [adapter.md](adapter.md) for the full design.
+
 ## 7. Robot / Operator Sessions
 
 * `RobotSession` — owns the robot, the router, the shared-autonomy layer, the

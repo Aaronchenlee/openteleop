@@ -30,6 +30,7 @@ OpenTeleop is a **commercially usable** (Apache-2.0) framework for remote-contro
 - **Time-synchronized multimodal feedback** — SyncBuffer aligns video/state/tactile by sender timestamps (30–50 ms skew eliminated).
 - **Force-residual shared autonomy hook** — robot-side residual layer (DexTeleop-0 style) that never traverses the network.
 - **Vendor-neutral robot interface** — bring your own UR/Sharpa/Unitree/Franka driver via `RobotController`.
+- **QoS adapter layer** — edge/cloud symmetric API (`advertise` / `subscribe` / `request`) with 8-dimension QoS contracts (rate / latency / jitter / up-down bandwidth / packet size / reliability / ordering), HMAC handshake + topic ACL + bandwidth quota (network-side auth), stricter-wins negotiation, a dynamic channel pool beyond the fixed six, and runtime monitoring with automatic degradation.
 
 ---
 
@@ -61,6 +62,7 @@ openteleop operator --local --peer 127.0.0.1 --hz 50
 | [docs/protocol.md](docs/protocol.md) | Wire protocol: six channels, message formats, QoS |
 | [docs/security.md](docs/security.md) | Four-level safety design and threat model |
 | [docs/deployment.md](docs/deployment.md) | Deployment topologies, network requirements, tuning |
+| [docs/adapter.md](docs/adapter.md) | QoS adapter layer: API, negotiation, auth, degradation |
 
 ---
 
@@ -76,6 +78,7 @@ openteleop/
 │   ├── robot/            # RobotController + CommandRouter + session
 │   ├── operator/         # InputAdapter + OperatorSession
 │   ├── retarget/         # Motion retargeting engine
+│   ├── adapter/          # QoS adapter layer (edge/cloud symmetric API)
 │   └── cli/              # openteleop command-line interface
 ├── docs/                 # Architecture / protocol / security / deployment
 ├── examples/             # Runnable examples
@@ -91,7 +94,7 @@ openteleop/
 pytest tests/ -v
 ```
 
-Covers: transport round-trips (ZMQ), command wire format, velocity limiting, SyncBuffer alignment, heartbeat deadman, safety monitor limits, video-freeze gate, command router (teleop flow + whitelist + e-stop), and a full operator↔robot end-to-end loopback integration test.
+Covers: transport round-trips (ZMQ), command wire format, velocity limiting, SyncBuffer alignment, heartbeat deadman, safety monitor limits, video-freeze gate, command router (teleop flow + whitelist + e-stop), full operator↔robot end-to-end loopback integration, and the QoS adapter layer (QoS validation/merge, dynamic channel allocation, HMAC auth + ACL + quota, bandwidth negotiation, degradation ladder, and edge↔cloud handshake+negotiation+dynamic-topic dataflow integration).
 
 ---
 
@@ -105,8 +108,10 @@ Covers: transport round-trips (ZMQ), command wire format, velocity limiting, Syn
 
 ## 🗺 Roadmap
 
+- [x] QoS adapter layer (edge/cloud symmetric API, negotiation, auth, degradation)
 - [ ] WebRTC signaling server (HTTPS/WebSocket reference implementation)
 - [ ] Hardware encoder integration (NVENC / VA-API) for the video channel
+- [ ] Adaptive bitrate (ABR) on the video channel driven by the monitor
 - [ ] Shared-autonomy residual QP solver (DexTeleop-0 style)
 - [ ] Data recording for imitation-learning datasets (shared teleop + autonomy)
 - [ ] Multi-operator room model (LiveKit Portal style)
